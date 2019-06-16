@@ -1,0 +1,172 @@
+function []=test_qcqp0()
+% ------------------------------------------
+%    min x'*A*x/2 - b'*x + y'*A*y/2 - c'*y
+%   s.t. (x'*x-1)/2=0, (y'*y-1)/2=0, x'*y=0
+% ------------------------------------------
+
+% test script on small problems in comparison with 
+% instructor's code calling the Matlab fmincon
+
+fprintf('\n')
+disp('parameter: n = problem size (default 400)')
+disp('parameter: s = scale b/c vs A (default 1)')
+fprintf('\n')
+
+clear
+global n s Solvers
+
+tol = 1.e-3%6;
+Solvers = {'my_qcqp_admm'};
+
+n =input('n = ');
+if isempty(n), n = 400; end
+n = ceil(sqrt(n))^2;
+A = gallery('neumann',n);
+A = -(A'*A); 
+
+rng('shuffle'); rng('default')
+b = randn(n,1); b = b/norm(b);
+c = randn(n,1); c = c/norm(c);
+Asiz = norm(A,'fro')/sqrt(n);
+b = Asiz*b; c = Asiz*c;
+
+%s = 1;
+s = input('s = ');
+%if isempty(s), s = 1; end
+b = s*b; c = s*c;
+
+Out = run_test(A,b,c,tol);
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+function Out = run_test(A,b,c,tol)
+global n s Solvers
+
+I = speye(n);
+X = zeros(n,2);
+Y = zeros(n,2);
+Obj = zeros(2,1);
+nsolve = 0; fn = 1;
+
+fobj = @(x,y).5*(x'*A*x + y'*A*y) - b'*x - c'*y;
+
+for j = 1:length(Solvers)
+    
+    solver = Solvers{j};
+    if ~exist(solver,'file'), continue; end
+    fprintf(['\n---- solver: ' solver '  n = %i  s = %.2f ---- \n'],n,s);
+    
+    tic, [x,y,lamb,out] = feval(solver,A,b,c,tol); toc, toc, toc
+    X(:,j) = x; Y(:,j) = y; Obj(j) = fobj(x,y); 
+    nsolve = nsolve + 1;
+    
+    DxL = A*x - b + lamb(1)*x + lamb(3)*y;
+    DyL = A*y - c + lamb(2)*y + lamb(3)*x;
+    Fv = [(x'*x-1)/2; (y'*y-1)/2; x'*y];
+    
+    fprintf(['\nsolver: ' solver '  n = %i  s = %.2f\n'],n,s);
+    fprintf('Optimality: [%6.2e %6.2e %6.2e]\n',...
+        norm(DxL)/(1+norm(b)),norm(DyL)/(1+norm(c)),norm(Fv))
+    fprintf('Convergence = %i at iter %i\n\n',...
+        out.converged,out.iter)
+    
+    if isfield(out,'rres')
+        figure(fn); fn = fn + 1;
+        semilogy(out.rres,'linewidth',2); grid on; shg
+        legend('DxL(x,y,lamb)','DyL(x,y,lamb)','(x,y) Feasibility')
+        xlabel('iter'), ylabel('residuals')
+        title('Iteration history of residuals')
+    end
+    
+    if isfield(out,'inner')
+        figure(fn); fn = fn + 1;
+        plot(out.inner,'linewidth',2); grid on; shg
+        legend('x-subprob','y-subprob')
+        xlabel('iter'), ylabel('No. of inners')
+        title('History of inner iteration numbers')
+    end
+    
+    if n <= 100000 && strcmp(solver,'yz_qcqp_admm')
+        tic
+        H = [A+lamb(1)*I lamb(3)*I; lamb(3)*I A+lamb(2)*I];
+        lamin = eigs(H,1,'smallestreal');
+        fprintf('Checking: 2nd-order sufficiency: %i\n',lamin>0)
+        toc
+    end
+    
+end
+
+if nsolve > 1
+    err_x = norm(X(:,1:2)*[1; -1]);
+    err_y = norm(Y(:,1:2)*[1; -1]);
+    fprintf('x and y errors: [%6.2e %6.2e]\n',err_x,err_y)
+end
+
+fprintf('objective values:\n')
+format long, disp(Obj), format short
+Out.X = X; Out.Y = Y; Out.Obj = Obj;
+
+function [x,y,lamb,out]=my_qcqp_admm(A,b,c,tol)
+n=size(A,1);
+    rho=1000;%rho一定要适当地大，否则出现异常NaN值
+    x=rand(n,1);%不能取0
+    y=rand(n,1);%不能取0
+    I = speye(n);
+    z1=x;u1=0;
+    z2=y;u2=0;
+    z3=1/sqrt(2)*(x+y);u3=0;
+    rres=[];
+    tic
+    maxiter=10000;
+    iters=maxiter;
+    for i=1:maxiter;%一般迭代次数越多越精确
+        Ai=A+rho*I+1/2*rho*I;
+        bi=b+rho*(z1+u1)+rho*1/sqrt(2)*(z3-1/sqrt(2)*y+u3);
+        ci=c+rho*(z2+u2)+rho*1/sqrt(2)*(z3-1/sqrt(2)*x+u3);
+        if 1
+        xi=Ai\bi;%公式(1)
+        yi=Ai\ci;%公式(2)
+        else
+        li=Ai\[bi,ci];%把公式（1），（2）合并，可以将计算时间减少1/3
+        xi=li(:,1);yi=li(:,2);
+        end
+        k=0.1;%这里采用小于0.3~0.7的平滑指数可以提高优化性能，但是过高的k值（>0.6)会导致约束无法满足
+        d=-(k*x+(1-k)*xi)+u1;%这里要用xi而不是x,也就是要用x的最新值
+        zi1=-d/sqrt(d'*d);%公式（3）中子优化问题求解
+        d=-(k*y+(1-k)*yi)+u2;%这里要用yi而不是y
+        zi2=-d/sqrt(d'*d);%公式（4）中子优化问题求解
+        d=-1/sqrt(2)*[k*(x+y)+(1-k)*(xi+yi)]+u3;%这里要用xi，yi而不是x，y
+        zi3=-d/sqrt(d'*d);%公式（5）中子优化问题求解
+        k=0.3;
+        u1=u1+k*(zi1-xi);%公式（6），平滑有时很重要
+        u2=u2+k*(zi2-yi);%公式（7），平滑很重要
+        u3=u3+k*(z3-1/sqrt(2)*(x+y));%公式（8）
+        k=0.0;
+        x=k*x+(1-k)*xi;
+        y=k*y+(1-k)*yi;
+        z1=k*z1+(1-k)*zi1;
+        z2=k*z2+(1-k)*zi2;
+        z3=k*z3+(1-k)*zi3;
+        li1=[x,0*x,y];li2=[0*x,y,x];li=[li1;li2];lib=[b-A*x;c-A*y];
+        lamb=(li'*li)\(li'*lib);
+        DxL = A*x - b + lamb(1)*x + lamb(3)*y;
+        DyL = A*y - c + lamb(2)*y + lamb(3)*x;
+        Fv = [(x'*x-1)/2; (y'*y-1)/2; x'*y];
+        fprintf('Optimality: [%6.2e %6.2e %6.2e]\n',norm(DxL)/(1+norm(b)),norm(DyL)/(1+norm(c)),norm(Fv))
+
+        rresi=[norm(DxL)/(1+norm(b)),norm(DyL)/(1+norm(c)),norm(Fv)];
+        rres=[rres;rresi];
+        if sum(rresi)/3<tol;
+            iters=i;
+            break;
+        end
+    end
+    out.iter=iters;
+    out.converged='true';
+    out.rres=rres;
+    if 1
+        figure(3);plot(rres);legend('Dxl','Dyl','Fv');
+    end
